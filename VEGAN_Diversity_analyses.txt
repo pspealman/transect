@@ -1,0 +1,11 @@
+#RGI Diversity analyses
+require(vegan)
+ARGS <- t(ARGS_counts_Year2_1_)
+Simp<- diversity(ARGS,index = "simpson")
+Simp
+Shan <- diversity(ARGS,index = "shannon")
+Shan
+DIV <- diversity(ARGS)
+DIV
+write.csv(Shan, "Shannon_RGI_y2.csv")
+write.csv(Simp, "Simpson_RGI_y2.csv")

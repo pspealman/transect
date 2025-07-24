@@ -1,0 +1,280 @@
+#Transect project
+library(tidyverse)
+library(qiime2R)
+library(phyloseq)
+library(ggplot2)
+library(vegan)
+library(readxl)
+library(PMCMRplus)
+
+
+#1- We first transform QIIME2 objects into R
+metadata<-read_tsv("FH_Transect_mapping.tsv")
+metadata
+str(metadata)
+
+temptaxa <- read_qza('taxonomy.qza')
+temptax<-temptaxa$data
+temptax
+# This then gets processed, first separating into columns, note the temptaxa_table is now a matrix:
+temptaxa_table <- separate(temptax, Taxon, sep=';', c('Kingdom', 'Phylum', 'Class', 'Order', 'Family', 'Genus', 'Species'))
+# then using the 'gsub' function to replace the prefixes with nothing  (ie. "")
+temptaxa_table <- apply(temptaxa_table, 2, function(x) gsub("d__|p__|c__|o__|f__|g__|s__", "", x))
+# then we replace any empty cell ("^$|^ $") with the datatype NA
+temptaxa_table <- apply(temptaxa_table, 2, function(x) gsub("^$|^ $", NA, x))
+# we then convert the matrix back into a dataframe 
+taxtable_p1 <- as.data.frame(temptaxa_table)
+head(taxtable_p1)
+write.csv(taxtable_p1, "taxonomy.csv")
+
+feature_table<-read_qza("table-dada2.qza")
+info_data <-feature_table$data
+info_data
+write.csv(info_data, "Otu_frequency")
+
+rooted_tree<- read_qza("rooted-tree.qza")
+root_tree <- rooted_tree$data
+
+#2- Creating phyloseq object (will be used for subsequent microbiome analysis)
+SEDIM<-phyloseq(
+  otu_table(info_data, taxa_are_rows = T), 
+  phy_tree(root_tree), 
+  tax_table(as.data.frame(taxtable_p1) %>% select(-Confidence) %>% column_to_rownames("Feature.ID") %>% as.matrix()), #moving the taxonomy to the way phyloseq wants it
+  sample_data(metadata %>% as.data.frame() %>% column_to_rownames("SampleID")))
+SEDIM
+
+#Colapse by taxa
+SEDIM_genus <- tax_glom(SEDIM, "Genus") # Not used often
+SEDIM_genus
+
+### Subset samples fo analysis with no water (remove distance 0)
+SEDIM_no_water = subset_samples(SEDIM, DISTANCE != "0")
+SEDIM_no_water
+
+## Remove ASVs that account for <1% of total
+total = median(sample_sums(SEDIM))
+Abund_otus <- filter_taxa(SEDIM, function(x) sum(x > total*0.01) > 0, TRUE) #This code usually breaks and requires us to restart the R session
+total
+# Rarefaction
+standf = function(x, t=total) round(t * (x / sum(x)))
+Abund_tax = transform_sample_counts(Abund_otus, standf)
+
+# Or if we only want to plot the top 10 phyla
+#subset with top 10 phyla (of those >1% ASVs)
+class.sum = tapply(taxa_sums(SEDIM), tax_table(SEDIM)[, "Class"], sum, na.rm=TRUE)
+phylum.sum = tapply(taxa_sums(SEDIM), tax_table(SEDIM)[, "Phylum"], sum, na.rm=TRUE) 
+#Get top 10 phyla
+top_phyla = names(sort(phylum.sum, TRUE))[1:10]
+SEDIM_10 = prune_taxa((tax_table(Abund_otus)[, "Phylum"] %in% top_phyla), Abund_otus)
+SEDIM_10
+# New rarefaction
+rar.10 = median(sample_sums(SEDIM_10))
+standf = function(x, t=rar.10) round(t * (x / sum(x)))
+Abund_10_tax = transform_sample_counts(SEDIM_10, standf)
+
+# Barplots of top phyla (many examples)
+plot_bar(Abund_10_tax, "Phylum", fill="Class") + geom_bar(aes(color=Class, fill=Class), stat="identity", position="stack")+ theme(legend.position = "bottom")+ theme_classic()
+plot_bar(Abund_10_tax, "Phylum", fill="Class", facet_grid=~DISTANCE) + geom_bar(aes(color=Class, fill=Class), stat="identity", position="stack")+ theme_bw ()+ theme(legend.position = "bottom")#+ theme(legend.position = c(0.95,0.72))
+plot_bar(Abund_otus, "Phylum", fill="Class", facet_grid=~DISTANCE) + geom_bar(aes(color=Class, fill=Class), stat="identity", position="stack")#+ theme(legend.position = c(0.83,0.7))
+plot_bar(Abund_otus, "Class", fill="Family") + geom_bar(aes(color=Family, fill=Family), stat="identity", position="stack")#+ theme(legend.position = c(0.83,0.7))
+plot_bar(Abund_otus, "Class", fill="Order", facet_grid=~DISTANCE) + geom_bar(aes(color=Order, fill=Order), stat="identity", position="stack")#+ theme(legend.position = c(0.9,0.4))
+plot_bar(Abund_10_tax, "Class", fill="Order", facet_grid=~DISTANCE) + geom_bar(aes(color=Order, fill=Order), stat="identity", position="stack")#+ theme(legend.position = "bottom")
+plot_bar(Abund_otus, "Family", fill="Genus", facet_grid=~DISTANCE) + geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack")#+theme(legend.position = c(0.25,0.7))
+plot_bar(Abund_otus, "Order", fill="Family", facet_grid=~DISTANCE) + geom_bar(aes(color=Family, fill=Family), stat="identity", position="stack")+theme(legend.position = "bottom")#+ theme(legend.position = c(0.16,0.55))
+plot_bar(Abund_otus, "Genus", fill="Species", facet_grid=~DISTANCE) + geom_bar(aes(color=Species, fill=Species), stat="identity", position="stack")#+ theme(legend.position = c(0.16,0.55)) #theme(legend.position = "none")
+plot_bar(SEDIM_10_1, "Genus", fill="Species") + geom_bar(aes(color=Species, fill=Species), stat="identity", position="stack")+ theme(legend.position = "none")
+
+#Individual plots of rarefaction of the most abundant taxa
+plot_bar(Abund_10_tax, fill = "Phylum") + geom_bar(aes(color=Phylum, fill=Phylum), stat="identity", position="stack") + theme(legend.position = "bottom")
+plot_bar(Abund_10_tax, "Class", fill = "Class") + geom_bar(aes(color=Class, fill=Class), stat="identity", position="stack") + theme(legend.position = "none")
+plot_bar(Abund_10_tax, fill = "Order") + geom_bar(aes(color=Order, fill=Order), stat="identity", position="stack") + theme(legend.position = "bottom")
+plot_bar(Abund_10_tax, fill = "Genus") + geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack")
+plot_bar(Abund_10_tax, fill = "Family") + geom_bar(aes(color=Family, fill=Family), stat="identity", position="stack") + theme(legend.position = "bottom")
+plot_bar(Abund_10_tax, fill = "Species") + geom_bar(aes(color=Species, fill=Species), stat="identity", position="stack")
+
+# Creating files with sequence counts per taxa for each level (total)
+phylum.totalsum = tapply(taxa_sums(SEDIM), tax_table(SEDIM)[, "Phylum"], sum, na.rm=TRUE)
+write.csv(phylum.totalsum, file = "Phylumcounts.csv")
+class.totalsum = tapply(taxa_sums(SEDIM), tax_table(SEDIM)[, "Class"], sum, na.rm=TRUE)
+write.csv(class.totalsum, file = "Classcounts.csv")
+order.totalsum = tapply(taxa_sums(SEDIM), tax_table(SEDIM)[, "Order"], sum, na.rm=TRUE)
+write.csv(order.totalsum, file = "Ordercounts.csv")
+fam.totalsum = tapply(taxa_sums(SEDIM), tax_table(SEDIM)[, "Family"], sum, na.rm=TRUE)
+write.csv(fam.totalsum, file = "Familycounts.csv")
+genus.totalsum = tapply(taxa_sums(SEDIM), tax_table(SEDIM)[, "Genus"], sum, na.rm=TRUE)
+write.csv(genus.totalsum, file = "Genuscounts.csv")
+specie.totalsum = tapply(taxa_sums(SEDIM), tax_table(SEDIM)[, "Species"], sum, na.rm=TRUE)
+write.csv(specie.totalsum, file = "Speciescounts.csv")
+
+# Alpha diversity analyses
+Rich<-estimate_richness(SEDIM)
+Rich
+write.csv(Rich, file = "Richness.csv")
+
+plot_richness (SEDIM, title="Richness and Diversity (Sample type)", measures=c("Observed", "Shannon"))+ geom_point(size=5, alpha=0.7)
+plot_richness (SEDIM, title="Richness and Diversity", measures=c("Observed", "Chao1", "ACE", "Shannon", "Simpson", "InvSimpson"))+ geom_point(size=5, alpha=0.7)
+plot_richness (SEDIM, color= "SITE", title="Diversity indices", measures=c("Observed", "Shannon", "Simpson"))
+plot_richness (SEDIM, color= "SITE", title="Observed ASVs per sample type", measures=c("Observed"))
+merge_data_site = merge_samples(SEDIM, "DISTANCE")
+plot_richness (merge_data_site, title="Richness and Diversity (Sample type)", measures=c("Observed", "Chao1", "Shannon", "Simpson"))
+
+##____ Make boxplot of alpha-diversity______#
+# Using ggplot2
+df <- Shannon_simpson_16S # these are excel tables with diversity indices
+df
+ggplot(data=df) + geom_boxplot(aes(x=factor(Distance), y=Simpson, fill=Day))+ geom_jitter(aes(x=factor(Distance), y=Simpson, fill=Day))+ ggtitle("Prokaryotic Simpson's Diversity")+ theme_classic()
+
+#Determine diversity using count tables (THE SAME AS THE ONES WE GET FROM THE ARGS ANALYSES)
+arg <- clinical_ARGs_transect_samples_count
+args <- t(arg) #Transpose table
+args
+Arg1 <- specnumber(args)
+Arg1
+write.csv(Arg1, "Rich_clinical_ARGs_sample.csv")
+args2<- diversity(args, index = "shannon", MARGIN = 1, base = exp(1))
+args2
+write.csv(args2, "Div_clinical_ARGs_sample.csv")
+args3<- diversity(args, index = "simpson")
+args3
+write.csv(args3, "simpson_clinical_ARGs_sample.csv")
+
+#Kruskal-Wallis test on alpha-diversity - tables of Simpson's index per site
+kruskal.test(Div_ARGs_16S_ITS_sample_site)
+PMCMRplus::kwAllPairsNemenyiTest(Div_ARGs_16S_ITS_sample_site)
+
+#Correlations
+Args_shan <-cor(Div_ARGs_16S_ITS_sample_site)
+abund <- cor(Args_shan, method = c("kendall"))
+abund
+write.csv(abund, "corr_div_environ_ARGs_all")
+corr <- round(cor(abund), 2) #correlations
+ggcorrplot(corr,
+           hc.order = TRUE, type = "lower",lab=TRUE,
+           lab_size = 6, method = "square",
+           colors = c("red","white","blue"))
+corr
+
+# check for significance
+Div_clinical_ARGs_sample <- Div_ARGs_16S_ITS_sample_site
+# Loops for automated pairwise tests
+for (i in colnames(Div_clinical_ARGs_sample)){
+  for (j in colnames(Div_clinical_ARGs_sample)){
+    if (i != j){
+      print(i)
+      print(j)
+      result<-cor.test(Div_clinical_ARGs_sample[[i]], Div_clinical_ARGs_sample[[j]], method = 'kendall', exact = F) # correlate pairs of columns with significance level
+      result$p.value
+      print(result$p.value)
+    }
+  }
+}
+
+#________ scatter plots of correlations ARGs vs. 16S and ITS ___#
+simp_rich <- Div_16S_ITS_ARGs_No_Water
+ggplot(simp_rich, aes(x = ITS_Simpson, y = ARG_Simpson)) +  geom_point(aes(size=1, shape=Site, color=Type)) + labs( x = "Fungal Simpson's Diverty", y = "ARG Richness", title = "Richness of ARGs vs. Fungal Diversity") + theme_classic()
+
+#_______Regression test of significance without water_____________#
+Varx <- Div_16S_ITS_ARGs_No_Water
+model.lin <- lm(ITS_richness ~ ARG_simpson, data= Varx) # avaliar vari?veis isoladas
+summary(model.lin)
+confint(model.lin)
+plot(model.lin)
+
+plot(resid(model.lin) ~ fitted(model.lin), pch = 16, ylab = "Residuos", 
+     xlab = "Valores ajustados") # Diagnosticar modelo
+abline(h = 0, col = 2)
+
+# DISTANCE MEASURES 
+# Remove taxa with <3 sequences in at least 20% of samples
+require(phyloseq)
+SED_process = filter_taxa(SEDIM, function(x) sum(x > 3) > (0.2*length(x)), TRUE)
+SED_process
+
+#Create ordination object and plot NMDS and PCoAs (WE USUALY ONLY KEEP BRAY-CURTIS FOR THE TRANSECT WORK)
+Ordination <-ordinate(SED_process, "NMDS", "bray")
+Ord_plot <-plot_ordination(SED_process, Ordination,  type= "samples", shape= "SITE", color = "DISTANCE", title="Taxa Ordination Bray-Curtis")+ geom_point(size=5)
+Ord_plot
+Bray_dist = phyloseq::distance(SED_process, method="bray")
+adonis2(Bray_dist ~ sample_data(SED_process)$DISTANCE) #PERMANOVA significance
+Ordination2 <-ordinate(SED_process, "NMDS", "jaccard", binary = T)
+plot_ordination(SED_process, Ordination2, type= "samples", shape= "SITE", color = "DISTANCE", 
+                title="Taxa Ordination Jaccard")+ geom_point(size=5)
+
+ordu = ordinate(SED_process, "PCoA", "unifrac", weighted=FALSE)
+plot_ordination(SED_process, ordu, type= "samples", shape= "SITE", color = "DISTANCE", title="Unweighted Unifrac Distance")+ geom_point(size=5)
+Uunifrac_dist = phyloseq::distance(SED_process, method="unifrac", weighted=F)
+adonis2(Uunifrac_dist ~ sample_data(SED_process)$DATE) #PERMANOVA significance
+
+ordu2 = ordinate(SED_process, "PCoA", "unifrac", weighted=TRUE)
+plot_ordination(SED_process, ordu2, type= "samples", shape= "SITE", color = "DISTANCE", title="Weighted Unifrac Distance")+ geom_point(size=5)
+wunifrac_dist = phyloseq::distance(SED_process, method="unifrac", weighted=T)
+adonis2(wunifrac_dist ~ sample_data(SED_process)$DATE) #PERMANOVA significance
+
+#Test correlations ASVs X environmental variables
+ASV_veg <- t(info_data) # Samples become rows and ASVs are columns 
+ASV.pca <- rda(ASV_veg)
+ASV_dist <- vegdist(ASV_veg) # Creates distance matrix of the ASVs
+
+#Plot PCA
+PCA_plot<-ordiplot(ASV.pca)
+PCA_plot 
+
+# Plotting environmental variables in the PCA
+Envdt1 <- read_excel("env_variables_noNA.xlsx")
+Envdt1
+Envdt <- Envdt1[, -c(2,6)]
+Tax_env <- envfit(ASV_dist, Envdt, permu=999, na.rm = TRUE)
+Tax_env
+plot(Tax_env, p.max = 0.1)
+# add labels to the samples in the ordiplot
+orditorp(PCA_plot, "site", pch="+", pcol="grey")
+
+
+#_____________________________________ Interpro diversity vs. ARGs ___________________#
+#Determine diversity using count tables and VEGAN analyses:
+Funcs <- Interpro_abundance
+Funct <- t(Funcs) #Transpose table
+Funct
+fun1 <- specnumber(Funct)
+fun1
+fun2<- diversity(Funct, index = "simpson", MARGIN = 1, base = exp(1))
+fun2
+
+#Kruskal-Wallis test on alpha-diversity - tables of Simpson's index per site
+kruskal.test(Div_ARGs_16S_ITS_sample_site)
+PMCMRplus::kwAllPairsNemenyiTest(Div_ARGs_16S_ITS_sample_site)
+
+#Correlations
+Args_shan <-cor(Interpro_abund_div)
+abund <- cor(Args_shan, method = c("kendall"))
+abund
+write.csv(abund, "corr_div_function_ARGs")
+corr <- round(cor(abund), 2) #correlacao
+ggcorrplot(corr,
+           hc.order = TRUE, type = "lower",lab=TRUE,
+           lab_size = 6, method = "square",
+           colors = c("red","white","blue"))
+corr
+# check for significance
+# Loops for automated pairwise tests
+for (i in colnames(Interpro_abund_div)){
+  for (j in colnames(Interpro_abund_div)){
+    if (i != j){
+      print(i)
+      print(j)
+      result<-cor.test(Interpro_abund_div[[i]], Interpro_abund_div[[j]], method = 'kendall', exact = F) # correlate pairs of columns with significance level
+      result$p.value
+      print(result$p.value)
+    }
+  }
+}
+
+#________ scatter plots of correlations ARGs vs. Functional div ___#
+simp_rich <- Interpro_abund_div
+simp_rich 
+simp_rich2 <- simp_rich[-c(1:3), ] # no water samples
+ggplot(simp_rich2, aes(x = fun_Richness, y = ARGc_Richness)) +  geom_point(aes(size=1, shape=Distance, color=1)) + labs( x = "Functional Richness", y = "Clinical ARGs Richness", title = "Richness of clinical ARGs vs. Functions") + theme_classic() #+ stat_cor(method = "kendall", label.x = -5, label.y = 30)
+
+model.lin <- lm(fun_Simpson ~ ITS_richness, data= simp_rich2) # avaliar variaveis isoladas
+summary(model.lin)
+confint(model.lin)
